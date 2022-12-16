@@ -1,0 +1,243 @@
+
+%% Script discription
+
+% AUTHOR: Fabian Mager (fabian.martin.mager@regionh.dk)
+
+%% Clean up
+%clc, clear all, close all
+
+%% Start EEG lab
+eeglab;
+
+%%  PSEUDOCODE
+
+% Load all EEG into ALLEEG structure
+
+% Load TemplateEEG into structure called TempEEG, e.g.:
+% TempEEG = pop_loadset('filename',template_file);
+
+% Specify sorting procedure, e.g.:
+% label_fit = 'Competitive';
+
+% Specify path to results as % path to result, e.g.:
+% path_to_results = '<your path>/Prototypes/'
+
+% Specify cohorts (used as subfolder in results), e.g.:
+% visit = {cohort1, cohort2}
+
+%% Adding relevant paths
+
+% figures
+mkdir([path_to_results 'Figures/']);
+
+for i=1:numel(visit)
+    mkdir([path_to_results visit{i} '/']);
+end
+
+% Other
+addpath([pwd '/export_fig'])
+
+%% Parameter
+
+% analysis:
+analysis = 'analysis3';
+
+% number of microstates
+%Nmicrostates = 7;
+
+
+% Print subject informations
+N = numel(ALLEEG);
+fprintf('I have loaded %.0f subjects now.\n',N)
+
+
+%% Parameters
+seed_rep = 10;
+m = 8;
+seq_len = 20000;
+
+%% Generating sequences
+
+fprintf('Generating synthetic data:\n') 
+
+% HMM sequence
+% initialize T and E matrices
+if Nmicro > 4
+    Nmicro = 5;
+end
+
+T_init = .1*ones(Nmicro)./(Nmicro-1);
+T_init(1:Nmicro+1:end) = .9;
+E_init = .1*ones(Nmicro)./(Nmicro-1);
+E_init(1:Nmicro+1:end) = .9;
+PSEUDOE = T_init;
+%E_init = .1*ones(Nmicro)./(Nmicro-1);
+%E_init(1:Nmicro+1:end) = .9;
+
+for i = 1:N
+    
+    fprintf(['\tSubject ' num2str(i) '/' num2str(N) '\n'])
+    
+    EEG = ALLEEG(i);
+    
+    fprintf(['\tProcessing subject' EEG.subject '\n'])
+        
+    sub_seq = EEG.microstate.fit.labels;
+    
+    for j = 1:size(sub_seq,1)
+                      
+        L = sub_seq(j,:);
+        
+        % Compress microstates >4
+        L(L>4) = 5;
+        
+        ms_seq{i}{j} = L;
+        
+        grp(i) = string(EEG.group);
+        
+        id(i) = string(EEG.subject);
+               
+    end
+                    
+    % Train HMM
+    [TRANS{i}, EMIT{i}] = hmmtrain(ms_seq{i},T_init,E_init,'Tolerance',1e-7,'Algorithm','Viterbi','Pseudotransitions',PSEUDOE);
+
+    % Generate sequence
+    [~, hmm_seq_full{i}] = hmmgenerate(seq_len, TRANS{i}, EMIT{i});
+    
+    % Unique labels
+    hmm_seq{i} = my_RLE(hmm_seq_full{i});
+    
+    % check if there are repetitive states
+    if any(diff(hmm_seq{i})==0)
+        error('Repetitions in sequence!')
+    end
+end
+
+%% random permutations
+
+fprintf('Random Permutation:\n')   
+for i = 1:N
+    fprintf(['\tSubject ' num2str(i) '/' num2str(N) '\n'])
+    for j = 1:seed_rep
+        [hmm_perm{i,j}]=rand_perm_no_rep_2(hmm_seq{i});
+    end
+end
+
+%% True entropy
+
+fprintf('Calc true entropy:\n')   
+for i = 1:N
+    fprintf(['\tSubject ' num2str(i) '/' num2str(N) '\n'])
+    [e_hmm_true(i,:),~,~]=sampenc(hmm_seq{i},m,0.1);
+end
+
+%% Fake entropy
+
+fprintf('Calc fake entropy:\n')     
+for i = 1:N
+    
+    fprintf(['\tSubject ' num2str(i) '/' num2str(N) '\n'])
+    
+    for j = 1:seed_rep
+        [e_hmm_temp(j,:),~,~]=sampenc(hmm_perm{i,j},m,.1);
+
+    end
+
+    e_hmm_fake(i,:) = mean(e_hmm_temp,1);
+    e_hmm_fake_std(i,:) = std(e_hmm_temp,1);
+    
+    % z scores
+    e_hmm_z(i,:) = (e_hmm_true(i,:) - e_hmm_fake(i,:)) ./ e_hmm_fake_std(i,:);
+    
+end
+
+%% plot e_true vs e_fake
+
+y_lab = unique(grp);
+fig = figure('units','normalized','outerposition',[0 0 1 1]);
+
+for i = 1:numel(y_lab)
+    
+    sel_sub = grp==y_lab(i);    
+    
+    % HMM sequence
+    e_hmm_mean{i} = mean(e_hmm_true(sel_sub,:),1,'omitnan');
+    e_hmm_se{i} = std(e_hmm_true(sel_sub,:), 0,1,'omitnan')./sqrt(sum(sel_sub));
+    e_hmm_var{i} = var(e_hmm_true(sel_sub,:), 0,1,'omitnan');
+    
+    e_hmm_fake_mean{i} = mean([e_hmm_fake(sel_sub,:)],1,'omitnan');
+    e_hmm_fake_se{i} = std([e_hmm_fake(sel_sub,:)], 0,1,'omitnan')./sqrt(sum(sel_sub));
+    e_hmm_fake_var{i} = var(e_hmm_fake(sel_sub,:), 0,1,'omitnan');
+    
+    % Original sequence
+    subplot(1,numel(y_lab),i)
+    hold on
+
+    plot(1:m,e_hmm_mean{i}(1:m),'.-r')
+    plot(1:m,e_hmm_fake_mean{i}(1:m),'.-b')
+    
+    plot(1:m,e_hmm_mean{i}(1:m)+e_hmm_se{i}(1:m),'-.r')
+    plot(1:m,e_hmm_mean{i}(1:m)-e_hmm_se{i}(1:m),'-.r')
+    
+    plot(1:m,e_hmm_fake_mean{i}(1:m)+e_hmm_fake_se{i}(1:m),'-.b')
+    plot(1:m,e_hmm_fake_mean{i}(1:m)-e_hmm_fake_se{i}(1:m),'-.b')
+    
+    ylim([1 1.6])
+        
+    xticks(1:m)
+    ylabel( sprintf( ['Entropy ' char(y_lab(i)) ', N=%.0f'],sum(sel_sub)),'Interpreter','Latex')
+    
+    hold off
+        
+end
+
+lgnd = legend('Sequence','Permutation','SE','Orientation','horizontal','Location','north')        ;
+
+saveas(fig,[path_to_results 'synth_entropy_comparison.png']);
+
+%% plot z scores
+
+y_lab = unique(grp);
+fig = figure('units','normalized','outerposition',[0 0 1 1]);
+
+for i = 1:numel(y_lab)
+    
+    sel_sub = grp==y_lab(i);    
+    
+    % HMM z-scores
+    e_hmm_z_mean{i} = mean(e_hmm_z(sel_sub,:),1,'omitnan');
+    e_hmm_z_se{i} = std(e_hmm_z(sel_sub,:), 0,1,'omitnan')./sqrt(sum(sel_sub));
+    e_hmm_z_var{i} = var(e_hmm_z(sel_sub,:), 0,1,'omitnan');
+    
+
+    plot(1:m,e_hmm_z_mean{i}(1:m))
+    
+    hold on
+    
+%     plot(1:m,e_hmm_z_mean{i}(1:m)+e_hmm_z_se{i}(1:m),'-.b')
+%     plot(1:m,e_hmm_z_mean{i}(1:m)-e_hmm_z_se{i}(1:m),'-.b')
+    
+    %ylim([1 1.6])
+        
+    xticks(1:m)
+    ylabel( sprintf( ['Entropy ' char(y_lab(i)) ', N=%.0f'],sum(sel_sub)),'Interpreter','Latex')
+            
+end
+
+lgnd = legend(y_lab(:),'Orientation','horizontal','Location','north','Interpreter','Latex')        ;
+
+saveas(fig,[path_to_results 'synth_entropy_z_comparison.png']);
+
+%% save results
+
+E_hmm_true = table(id', grp', e_hmm_true);
+E_hmm_fake = table(id', grp', e_hmm_fake);
+E_hmm_z = table(id', grp', e_hmm_z);
+
+writetable(E_hmm_true,[path_to_results '/E_hmm_true.csv'])
+writetable(E_hmm_fake,[path_to_results '/E_hmm_fake.csv'])
+writetable(E_hmm_z,[path_to_results '/E_hmm_z.csv'])
+
+
+
